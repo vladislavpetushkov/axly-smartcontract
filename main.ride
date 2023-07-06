@@ -1,0 +1,945 @@
+{-# STDLIB_VERSION 6 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+#keys starts with SF means SwopFi
+#keys starts with WX means Waves Exchange
+
+##START CONSTANS##
+let SF_POOL = "SF"
+let WX_POOL = "WX"
+let CAP_FEE_NO_LOAN = "capNoLoan"
+let CAP_FEE_LOAN = "capLoan"
+let STOPLOSS_FEE_NO_LOAN = "stopLossNoLoan"
+let STOPLOSS_LOAN = "stopLossLoan"
+let LOAN_FEE = "loan"
+let NO_LOAN_FEE = "noLoan"
+let NO_FEE = "noFee"
+let SCALE8 = 100000000
+let SCALE10 = 10000000000
+let SCALE16 = toBigInt(10000000000000000)
+let FEE_SCALE6 = 1000000
+##END CONSTANS##
+
+let kSFPoolAAssetBalance = "A_asset_balance" # balance A on swopfi
+let kSFPoolBAssetBalance = "B_asset_balance" # balance B on swopfi
+let kSFPoolAAssetId = "A_asset_id" # A asset id on swopfi
+let kSFPoolBAssetId = "B_asset_id" # B asset id on swopfi
+let kSFPoolShareId = "share_asset_id" # lp token id on swopfi
+let kSFPoolShareSupply = "share_asset_supply" # lp supply on swopfi
+let kSFPoolFee = "commission" #pool comission on swop.fi
+let kUserPosition = "_user_position" # with {POOLADDR}_{USERADDR}_{POSITION_NUMBER} prefix, amount shartokens in position staked by user in pool
+let kUserPositionPool = "_user_position_pool" # with {USERADDR}_{POSITION_NUMBER} prefix, get pool by user position
+let kUserBorrowAmount = "_user_position_borrow_amount" # with {POOLADDR}_{USERADDR}_{POSITION_NUMBER} prefix, amount of borrowed tokens in position
+let kUserBorrowAssetId = "_user_position_borrow_asset_id" # with {POOLADDR}_{USERADDR}_{POSITION_NUMBER} prefix, asset id of borrowed tokens in position
+let kUserPositionNum = "_user_position_number" # with {USERADDR} prefix, user position nubmer in this pool
+let kUserPositionInterest = "_user_position_interest" # with with {POOLADDR}_{USERADDR}_{POSITION_NUMBER} prefix, user position interest
+let kPoolTotal = "_pool_total" # with {POOLADDR}_ prefix, total amount staked in pool by all users
+let kPoolTotalLoan = "_pool_total_loan" #with {POOLADDR}_ prefix, total amount staked in pool with  by all users 
+let kPoolInterestLoan = "_pool_interest_loan" # with {POOLADDR}_ prefix, pool interest with loans
+let kPoolInterestNoLoan = "_pool_interest_no_loan" # with {POOLADDR}_ prefix, pool interest with no loans
+let kPoolCanBorrow = "_pool_can_borrow" # with {POOLADDR}_ prefix, can user get borrow in this pool
+let kAxlyInFeeWithoutLoan = "_axly_fee_without_loan" # with {POOLADDR} prefix
+let kAxlyInFeeWithLoan = "_axly_fee_with_loan" # with {POOLADDR} prefix
+let kAxlyNoLoanCapFee = "_axly_fee_cap_with_loan" # with {POOLADDR} prefix
+let kAxlyWithLoanCapFee = "_axly_fee_cap_no_loan" # with {POOLADDR} prefix
+let kAxlyStopLossNoLoanFee = "_axly_fee_stoploss_with_loan" # with {POOLADDR} prefix
+let kAxlyStopLossLoanFee = "_axly_fee_stoploss_no_loan" # with {POOLADDR} prefix
+let kRequestId = "_request_id" # with request id prefix
+let kRequestIter = "requests_iter" # currrent request number
+let kPool = "pool_" # with {POOLADDR} postfix
+let kSharePool = "_pool_share_id" # with {SHARE_ASSET_ID} prefix
+let kPoolCapChange = "_pool_cap_change" # with {POOLADDR}_ prefix, amount of token(SWOP/WX) left after capitalization for next exchange
+let kTokenLastPrice = "last_price" #last token prices in tx format: {A asset price},{B asset price},{LP asset price}(for backend)
+let kPriceInOracle = "_twap5B" #with {ASSET_ID} prefix key for asset price in $ in price oracle 
+
+let kUserStopLoss = "_stop_loss" #with {POSITTION_ID}_{POOLADDR}_{ASSET_ID} prefix, price of token to withdrow position
+
+let kMoneyBox = "axly_money_box"
+let kSFFarmingAddr = "swopfi_farming_addr"
+let kLendService = "lend_service_addr"
+let kAdminCallPK = "admin_call_pub_key"
+let kPriceOracle = "price_oracle"
+let kExContract = "exchange_contract"
+let kWxSwapContract = "wx_swap_contract"
+let kSwopId = "swop_id"
+let kWxId = "wx_id"
+
+let moneyBox = Address(this.getString(kMoneyBox).valueOrErrorMessage("No axly moneyBox address").fromBase58String())
+let exContract = Address(this.getString(kExContract).valueOrErrorMessage("No exchange contract address").fromBase58String())
+let priceOracleAddr = Address(this.getString(kPriceOracle).valueOrErrorMessage("No price oracle address").fromBase58String())
+let wxSwapContract = Address(this.getString(kWxSwapContract).valueOrErrorMessage("No wx swap address").fromBase58String())
+let SWOPID = this.getString(kSwopId).valueOrErrorMessage("No swop id").fromBase58String()
+let WXID = this.getString(kWxId).valueOrErrorMessage("No wx id").fromBase58String()
+
+func getLendSrvAddr() = Address(this.getString(kLendService).valueOrErrorMessage("Can't get lend service addr").fromBase58String())
+
+func getAdminCallAddr() = this.getString(kAdminCallPK).valueOrErrorMessage("Can't get admin addr").fromBase58String().addressFromPublicKey()
+
+func isAdminCall(i: Invocation) = if i.caller == getAdminCallAddr() then unit
+        else throw("Only admin can call this function")
+
+func isSelfCall(i: Invocation) = if i.caller == this then unit
+        else throw("Only contract itself can call this function")
+
+func isLandCall(i: Invocation) = if i.caller == getLendSrvAddr() then unit
+        else throw("Only land contract can call this function")
+
+func accountBalance(assetId: ByteVector|Unit) = match assetId {
+    case id: ByteVector => this.assetBalance(id)
+    case waves: Unit => this.wavesBalance().available
+}
+
+# get balances on swopfi
+func getSFPoolBalances(poolAddr: Address) = (
+    poolAddr.getInteger(kSFPoolAAssetBalance).valueOrErrorMessage("Can't get pool A asset balance"),
+    poolAddr.getInteger(kSFPoolBAssetBalance).valueOrErrorMessage("Can't get pool B asset balance")
+)
+
+# get balances on wx
+func getWXPoolBalances(poolAddr: Address, aId: String, bId: String) = (
+  poolAddr.invoke("getAccBalanceWrapperREADONLY", [aId], []).exactAs[Int],
+  poolAddr.invoke("getAccBalanceWrapperREADONLY", [bId], []).exactAs[Int]
+)
+
+# get pool balances
+func getPoolBalances(poolAddr: Address, type:String, aId: String, bId: String) = {
+  if type == SF_POOL then
+    getSFPoolBalances(poolAddr)
+  else if type == WX_POOL then
+    getWXPoolBalances(poolAddr, aId, bId)
+  else
+    throw("Wrong pool type")
+}
+
+# get pool data on swopfi
+func getSFPoolData(poolAddr: Address) = {
+  strict (balA, balB) = getSFPoolBalances(poolAddr)
+  (
+    poolAddr.getString(kSFPoolAAssetId).valueOrErrorMessage("Can't get pool A asset id"),
+    poolAddr.getString(kSFPoolBAssetId).valueOrErrorMessage("Can't get pool B asset id"),
+    balA,
+    balB,
+    poolAddr.getString(kSFPoolShareId).valueOrErrorMessage("Can't get share asset id")
+  )
+}
+
+# get pool data on wx
+func getWXPoolData(poolAddr: Address) = (
+  strict cfg = poolAddr.invoke("getPoolConfigWrapperREADONLY", [], []).exactAs[List[Any]]
+  let aId = cfg[4].as[String].valueOrErrorMessage("Can't get pool A asset id")
+  let bId = cfg[5].as[String].valueOrErrorMessage("Can't get pool B asset id")
+  let shareId = cfg[3].as[String].valueOrErrorMessage("Can't get pool LP asset id")
+  strict (balA, balB) = getWXPoolBalances(poolAddr, aId, bId)
+  (aId, bId, balA, balB, shareId)
+)
+
+func getPoolData(poolAddr: Address, type:String) = {
+  if type == SF_POOL then
+    getSFPoolData(poolAddr)
+  else if type == WX_POOL then
+    getWXPoolData(poolAddr)
+  else
+    throw("Wrong pool type")
+}
+
+func getShareSupply(poolAddr: Address, type:String, shareId: String) = {
+   if type == SF_POOL then
+    poolAddr.getInteger(kSFPoolShareSupply).valueOrErrorMessage("Can't get share asset supply")
+  else if type == WX_POOL then
+    assetInfo(shareId.fromBase58String()).valueOrErrorMessage("Wrong ShareId").quantity
+  else
+    throw("Wrong pool type")
+}
+
+func getPoolTotalShare(pool: String) = this.getInteger(pool + kPoolTotal).valueOrElse(0)
+
+func getPoolTotalShareWithLoan(pool: String) = this.getInteger(pool + kPoolTotalLoan).valueOrElse(0)
+
+func getNewUserPositionNumber(user:String) = this.getInteger(user + kUserPositionNum).valueOrElse(0) + 1
+
+func getAxlyFee(pool: String, feeType: String) = {
+  if feeType == CAP_FEE_LOAN then 
+     this.getIntegerValue(pool + kAxlyWithLoanCapFee)
+  else if feeType == CAP_FEE_NO_LOAN then 
+     this.getIntegerValue(pool + kAxlyNoLoanCapFee)
+  else if feeType == LOAN_FEE then 
+    this.getIntegerValue(pool + kAxlyInFeeWithLoan)
+  else if feeType == NO_LOAN_FEE then
+    this.getIntegerValue(pool + kAxlyInFeeWithoutLoan)
+  else if feeType == NO_FEE then 
+    0
+  else
+    throw("Wrong fee type")
+}
+
+func getSFFarmingAddr() = Address(this.getString(kSFFarmingAddr).valueOrErrorMessage("Can't get swopfi farming addr").fromBase58String())
+
+func getWXFarmingAddr(poolAddr: Address) = {
+  let fContract = poolAddr.getString("%s__factoryContract").valueOrErrorMessage("Can't get WX factory contract addr").fromBase58String().Address()
+  let factroyCfg = fContract.getString("%s__factoryConfig").valueOrErrorMessage("Can't get WX factory cfg").split("__")
+  Address(factroyCfg[1].fromBase58String())
+} 
+
+func assetIdToStr(assetId: Any ) = match assetId {
+    case id: ByteVector => id.toBase58String()
+    case waves: Unit => "WAVES"
+    case _ => throw("Not Asset id")
+}
+
+func assetIdFromStr(assetId: String) = if assetId == "WAVES" then unit else assetId.fromBase58String()
+
+func getAssetDecimals(assetId: String) = if assetId == "WAVES" then 8 else match assetInfo(assetId.fromBase58String()) {
+    case asset:Asset =>
+        asset.decimals
+    case _ => throw("Can't find asset")
+}
+
+func getAssetPrecition(assetId: String) = pow(10, 0, getAssetDecimals(assetId), 0, 0, DOWN)
+
+func getAssetsPrice(assetIds: List[String]) = {
+  func getPrices(a: List[Int], assetId:String) = {
+    let assetPrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
+    (a :+ assetPrice)
+  }
+  FOLD<50>(assetIds, [], getPrices)
+}
+
+func getSharePrice(shareId: String) = {
+  let pool = this.getString(shareId + kSharePool).valueOrErrorMessage("Can't find pool addr by share id")
+  let poolAddr = pool.fromBase58String().Address()
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+  let (aId, bId, aBalance, bBalance) = getPoolData(poolAddr, pType)
+  let dPriceA = priceOracleAddr.getIntegerValue(aId + kPriceInOracle)
+  let dPriceB = priceOracleAddr.getIntegerValue(bId + kPriceInOracle)
+  let shareSupply = getShareSupply(poolAddr, pType, shareId)
+  let APrecision = pow(10, 0, getAssetDecimals(aId), 0, 0, DOWN)
+  let BPrecision = pow(10, 0, getAssetDecimals(bId), 0, 0, DOWN)
+  let sharePrecision = pow(10, 0, getAssetDecimals(shareId), 0, 0, DOWN)
+  let sum = fraction(aBalance, dPriceA, APrecision) + fraction(bBalance, dPriceB, BPrecision)
+  fraction(sum, sharePrecision, shareSupply)
+}
+
+func getSharePrices(shareIds: List[String]) = {
+  func getPrices(a: List[Int], shareId:String) = {
+    a :+ getSharePrice(shareId)
+
+  }
+  FOLD<20>(shareIds, [], getPrices)
+}
+
+func getCursEntries(aId: String, bId: String, shareId: String, wAmounts: List[String]) = {
+  let assetsPrices = getAssetsPrice([aId, bId])
+  let sharePrice = getSharePrice(shareId)
+  let prices = [assetsPrices[0].toString(), assetsPrices[1].toString(), sharePrice.toString()] ++ wAmounts
+  [
+    StringEntry(kTokenLastPrice, prices.makeString(","))
+  ]
+}
+
+func calcReplenishByTwoTokens(pType: String, poolAddr: Address, pmtA: Int, aId: String, pmtB: Int, bId: String, balA: Int, balB: Int) = {
+  if pType == SF_POOL then 
+    strict repl = poolAddr.invoke("callFunction", ["calcLPReplenishTwoTokensREADONLY", [pmtA.toString(), pmtB.toString()]], nil).exactAs[List[Any]]
+    (repl[3].exactAs[Int], repl[4].exactAs[Int], repl[1].exactAs[Int], repl[2].assetIdToStr(), repl[0].exactAs[Int])
+  else
+    strict (evalPutInA, evalPutInB) = 
+      (
+        poolAddr.invoke("evaluatePutByAmountAssetREADONLY", [pmtA], []).exactAs[String].split("__"),
+        poolAddr.invoke("evaluatePutByPriceAssetREADONLY", [pmtB], []).exactAs[String].split("__")
+      )
+    let lpInA = evalPutInA[1].parseIntValue()
+    let lpInB = evalPutInB[1].parseIntValue()
+    if  lpInA < lpInB then
+      let pmt = evalPutInA[8].parseIntValue()
+      (pmtA, pmt, pmtB - pmt, bId, lpInB)
+    else
+      let pmt = evalPutInB[7].parseIntValue()
+      (pmt, pmtB, pmtA - pmt, aId, lpInA) 
+}
+
+func replenishTwoTokensByType(poolAddr: Address, pType: String, pmtA:Int, aId:String, pmtB:Int, bId:String) = {
+  let payments = [
+    AttachedPayment(aId.assetIdFromStr(), pmtA), 
+    AttachedPayment(bId.assetIdFromStr(), pmtB)
+  ]
+  if pType == SF_POOL then 
+    poolAddr.invoke("callFunction", ["replenishWithTwoTokens", ["false", "0"]], payments)
+  else
+    poolAddr.invoke("put", [1000000, false], payments)
+}
+
+func replenishOneTokenByType(poolAddr: Address, pType: String, pmt:Int, pmtId:String) = {
+  let payments = [AttachedPayment(pmtId.assetIdFromStr(), pmt)]
+  if pType == SF_POOL then 
+    poolAddr.invoke("callFunction", ["replenishWithOneToken", ["0", "false", "0"]], payments)
+  else
+     poolAddr.invoke("putOneTkn", [0, false], payments)
+}
+
+func stakeLP(pool: String, pType: String, shareId: String, amount: Int) = { 
+  let payments = [AttachedPayment(shareId.fromBase58String(), amount)]
+  if pType == SF_POOL then
+    getSFFarmingAddr().invoke("lockShareTokens", [pool, 0], payments)
+  else
+    getWXFarmingAddr(pool.addressFromStringValue()).invoke("stake", nil, payments)
+}
+
+func unstakeLP(pool: String, pType: String, shareId: String, amount: Int) = {
+  let (farmAddr, fName, params) = 
+    if pType == SF_POOL then
+      (
+        getSFFarmingAddr(),
+        "withdrawShareTokens",
+        [pool, amount]
+      )
+    else if pType == WX_POOL then 
+      (
+        getWXFarmingAddr(pool.fromBase58String().Address()),
+        "unstake",
+        [shareId, amount]
+      )
+    else 
+      throw("Wrong pool type")
+    strict inv = invoke(farmAddr, fName, params, nil)
+  amount
+}
+
+func calcAmountToPaySF(pool: String, assetIdA:String, assetIdB:String, balA:Int, balB:Int, amountTokenToGet: Int, assetTokenToGet: String) = {
+  let poolAddr = pool.fromBase58String().Address()
+  let feeScale6 = 1000000
+  let fee = poolAddr.getIntegerValue(kSFPoolFee)
+  let amntGetNoFee = amountTokenToGet.fraction(feeScale6, feeScale6 - fee, CEILING)
+  let (amountToPay, assetToPay) = 
+    if assetTokenToGet == assetIdA then
+      let amountToPay = amntGetNoFee.fraction(balB, balA - amntGetNoFee, CEILING)
+      (amountToPay, assetIdB)
+    else
+      let amountToPay = amntGetNoFee.fraction(balA, balB - amntGetNoFee, CEILING) 
+      (amountToPay, assetIdA)
+    (assetToPay, amountToPay)
+}
+
+func calcAmountToPayWX(pool: String, assetIdA:String, assetIdB:String, balA:Int, balB:Int, amountTokenToGet: Int, assetTokenToGet: String) = {
+  let prFee = wxSwapContract.getIntegerValue("%s__protocolFee")
+  let pFee = wxSwapContract.getIntegerValue("%s__poolFee")
+  let feeScale = toBigInt(100000000)
+  let (amountToPay, assetToPay) = 
+    if assetTokenToGet == assetIdA then
+        let amountToPay = amountTokenToGet.fraction(balB, balA - amountTokenToGet)
+        (amountToPay, assetIdB)
+    else
+      let amountToPay = amountTokenToGet.fraction(balA,  balB - amountTokenToGet)
+      (amountToPay, assetIdA)
+  let amountToPayWithFee = toBigInt(amountToPay).fraction(feeScale, feeScale - toBigInt(prFee + pFee), CEILING).toInt()
+  (assetToPay, amountToPayWithFee)
+}
+
+func exchangeDirectly(type: String, pool: String, assetIdA:String, assetIdB:String, balA:Int, balB:Int, amountTokenToGet: Int, assetTokenToGet: String) = {
+  if type == SF_POOL then
+    let (assetToPay, amountToPay) = calcAmountToPaySF(pool, assetIdA, assetIdB, balA, balB, amountTokenToGet, assetTokenToGet)
+    pool.addressFromStringValue().invoke("callFunction", ["exchange", [amountTokenToGet.toString()]], [AttachedPayment(assetToPay.assetIdFromStr(), amountToPay)])
+  else
+    let (assetToPay, amountToPay) = calcAmountToPayWX(pool, assetIdA, assetIdB, balA, balB, amountTokenToGet, assetTokenToGet)
+    wxSwapContract.invoke("swap", [amountTokenToGet, assetTokenToGet, this.toString()], [AttachedPayment(assetToPay.assetIdFromStr(), amountToPay)])
+}
+
+func calcWithdrawLPFromPoolVirt(poolAddr:Address, pType: String, shareId: String, userCanWithdraw:Int) = {
+  let (amountA, amountB) = 
+    if pType == SF_POOL then 
+      strict inv = poolAddr.invoke("callFunction", ["withdrawREADONLY", [userCanWithdraw.toString()]], []).exactAs[(Int, Int)]
+      (inv._1, inv._2)
+    else
+      strict inv = poolAddr.invoke("evaluateGetREADONLY", [shareId, userCanWithdraw], []).exactAs[String].split("__")
+      (inv[1].parseIntValue(), inv[2].parseIntValue())
+  (amountA, amountB)
+}
+
+#claim tokens [Swop, WX] from farming
+func claimFarmed(type: String, pool: String) = {
+  if type == SF_POOL then 
+      strict balBefore = accountBalance(SWOPID)
+      strict inv = getSFFarmingAddr().invoke("claim", [pool], [])
+      let balAfter = accountBalance(SWOPID)
+      (balAfter - balBefore, SWOPID)
+    else if type == WX_POOL then 
+      strict balBefore = accountBalance(WXID)
+      strict inv = getWXFarmingAddr(pool.fromBase58String().Address()).invoke("claimWX", [pool], [])
+      let balAfter = accountBalance(WXID)
+      (balAfter - balBefore, WXID)
+    else throw("Wrong pool type")
+}
+
+# function check pool type (SF or WX) and replenish it
+func replenishByType(
+  pType: String,  
+  pool: String,
+  feeType: String, 
+  pmtA: Int, 
+  aId: String, 
+  pmtB: Int, 
+  bId: String, 
+  balA: Int, 
+  balB: Int, 
+  LPId: String) = {
+
+  strict lpBalanceBefore = accountBalance(LPId.fromBase58String())
+  let poolAddr = pool.addressFromStringValue()
+  let (change, changeId) = 
+    if pmtA > 0 && pmtB > 0 then 
+      let (pmtInA, pmtInB, change, changeId) = calcReplenishByTwoTokens(pType, poolAddr, pmtA, aId, pmtB, bId, balA, balB)
+      strict inv = poolAddr.replenishTwoTokensByType(pType, pmtInA, aId, pmtInB, bId)
+      (change, changeId)
+    else if pmtA > 0 then
+      (pmtA, aId)
+    else if pmtB > 0 then
+      (pmtB, bId)
+    else throw("pmts must be > 0")
+  
+  strict inv =  
+    if change > 0 then
+      poolAddr.replenishOneTokenByType(pType, change, changeId)
+    else
+      nil
+
+  let lpBalanceAfter = accountBalance(LPId.fromBase58String())
+  let totalStaked = lpBalanceAfter - lpBalanceBefore
+  let axlyFeeAmount = fraction(totalStaked, getAxlyFee(pool, feeType), FEE_SCALE6)
+  let userShareForStake = totalStaked - axlyFeeAmount
+
+  if userShareForStake <= 0 then throw("amount of staked sharetokens must be > 0") else
+
+  strict invLP = stakeLP(pool, pType, LPId, userShareForStake)
+  (userShareForStake, axlyFeeAmount)
+}
+
+# calc replenish enteries
+func replenishEntries(pool: String, user: String, stakedAmount: Int, axlyFeeAmount: Int, posNum: Int,  shareId:String, type: String, withLoan: Boolean) = {
+  let totalAmount = getPoolTotalShare(pool)
+  let totalAmountLoan = getPoolTotalShareWithLoan(pool)
+  let (curPoolInterest, totalStakedWithLoan) = 
+    if withLoan then 
+      (this.getIntegerValue(pool + kPoolInterestLoan), totalAmountLoan + stakedAmount)
+    else 
+      (this.getIntegerValue(pool + kPoolInterestNoLoan), totalAmountLoan)
+  [
+    IntegerEntry(pool + kPoolTotal, totalAmount + stakedAmount),
+    IntegerEntry(pool + kPoolTotalLoan, totalStakedWithLoan),
+    IntegerEntry(pool + "_" + user + "_" + posNum.toString() + kUserPosition, stakedAmount),
+    IntegerEntry(pool + "_" + user + "_" + posNum.toString() + kUserPositionInterest, curPoolInterest),
+    StringEntry(user + "_" + posNum.toString() + kUserPositionPool, pool),
+    IntegerEntry(user + kUserPositionNum, posNum),
+    
+    ScriptTransfer(moneyBox, axlyFeeAmount, shareId.fromBase58String())
+  ]
+}
+
+#exchange keeper
+func exchangeKeeper(
+  toToken: String,
+  pmtAmount: Int, 
+  pmtAsset: ByteVector,
+  amountsIn: List[Int], 
+  addresses: List[String], 
+  assetsToReceive: List[String], 
+  estReceived: List[Int], 
+  slippageTolerance: Int, 
+  minReceived: Int, 
+  options: List[String]
+) = {
+  strict tokenBalanceBefore = accountBalance(toToken.assetIdFromStr())
+  strict inv = exContract.invoke("swap", [amountsIn, addresses, assetsToReceive, estReceived, slippageTolerance, minReceived, options], [AttachedPayment(pmtAsset, pmtAmount)])
+  accountBalance(toToken.assetIdFromStr()) - tokenBalanceBefore 
+}
+
+#exchange on puzzle
+func exchangePuzzle(
+  toToken: String,
+  pmtAmount: Int, 
+  pmtAsset: ByteVector,
+  routesStr: String, 
+  minToReceive: Int,
+  options: List[String]
+) = {
+  strict tokenBalanceBefore = accountBalance(toToken.assetIdFromStr())
+  strict inv = exContract.invoke("puzzleSwap", [routesStr,minToReceive,options], [AttachedPayment(pmtAsset, pmtAmount)])
+  accountBalance(toToken.assetIdFromStr()) - tokenBalanceBefore 
+}
+
+#exchange on swopfi
+func exchangeSwopFi(
+  toToken: String,
+  pmtAmount: Int, 
+  pmtAsset: ByteVector,
+  exchangers: List[String],
+  exchangersType: List[String],
+  args1: List[String],
+  args2: List[String],
+  routingAssetsKeys: List[String],
+  minAmountToReceive: Int,
+  options: List[String]
+) = {
+  strict tokenBalanceBefore = accountBalance(toToken.assetIdFromStr())
+  strict inv = exContract.invoke("swopfiSwap", [exchangers, exchangersType, args1, args2, routingAssetsKeys, minAmountToReceive, options], [AttachedPayment(pmtAsset, pmtAmount)])
+  accountBalance(toToken.assetIdFromStr()) - tokenBalanceBefore
+}
+
+# capitalize
+func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int) = {
+  let poolAddr = pool.fromBase58String().Address()
+  let (AId, BId, balA, balB, shareId) = getPoolData(poolAddr, pType)
+  if tokenId != AId && tokenId != BId then throw("Wrong asset") else
+  #replenish
+  let (pmtA, pmtB) = if tokenId == AId then (tokenAmount, 0) else (0, tokenAmount)
+  let (stakedAmount, nf) = replenishByType(pType, pool, NO_FEE, pmtA, AId, pmtB, BId, balA, balB, shareId)
+
+  let curPoolInterestLoan = this.getInteger(pool + kPoolInterestLoan).valueOrElse(0)
+  let curPoolInterestNoLoan = this.getInteger(pool + kPoolInterestNoLoan).valueOrElse(0)
+  let totalShareAmount = getPoolTotalShare(pool)
+  let totalShareAmountWithLoan = getPoolTotalShareWithLoan(pool)
+  let loanPercent = fraction(totalShareAmountWithLoan, SCALE8, totalShareAmount)
+  let stakedLoan = fraction(stakedAmount, loanPercent, SCALE8)
+  let stakedNoLoan = stakedAmount - stakedLoan
+  let newInterestLoan = if totalShareAmountWithLoan > 0 then 
+      curPoolInterestLoan + fraction(stakedLoan, SCALE10, totalShareAmountWithLoan)
+    else
+      0
+  let newInterestNoLoan = if totalShareAmount - totalShareAmountWithLoan > 0 then 
+      curPoolInterestNoLoan + fraction(stakedNoLoan, SCALE10, totalShareAmount - totalShareAmountWithLoan)
+    else 
+      0
+  let axlyFeeLoan = fraction(stakedLoan, getAxlyFee(pool, CAP_FEE_LOAN), FEE_SCALE6)
+  let axlyFeeNoLoan = fraction(stakedNoLoan, getAxlyFee(pool, CAP_FEE_NO_LOAN), FEE_SCALE6)
+  strict axlyFee = unstakeLP(pool, pType, shareId, axlyFeeLoan + axlyFeeNoLoan)
+  [
+    IntegerEntry(pool + kPoolInterestLoan, newInterestLoan),
+    IntegerEntry(pool + kPoolInterestNoLoan, newInterestNoLoan),
+    IntegerEntry(pool + kPoolTotal, totalShareAmount + stakedAmount - axlyFee),
+    IntegerEntry(pool + kPoolTotalLoan, totalShareAmountWithLoan + stakedLoan - axlyFeeLoan),
+    ScriptTransfer(moneyBox, axlyFeeLoan + axlyFeeNoLoan, shareId.fromBase58String())
+  ] ++ getCursEntries(AId, BId, shareId, [])
+}
+
+func withdrawAmountCalc(pool:String, userCanWithdraw:Int, debt: Int, borrowAsset: String) = {
+  let poolAddr = Address(pool.fromBase58String())
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Unknown pool")
+  let (assetIdA, assetIdB, balA, balB, shareId) = getPoolData(poolAddr, pType)
+  strict cBalABefore = accountBalance(assetIdA.assetIdFromStr())
+  strict cBalBBefore = accountBalance(assetIdB.assetIdFromStr())
+  strict inv =  
+    if pType == SF_POOL then 
+      poolAddr.invoke("callFunction", ["withdraw", [userCanWithdraw.toString()]], []) 
+    else
+      strict inv = unstakeLP(pool, pType, shareId, userCanWithdraw)
+      poolAddr.invoke("get", [], [AttachedPayment(shareId.assetIdFromStr(), userCanWithdraw)]) 
+
+  let cBalAAfter = accountBalance(assetIdA.assetIdFromStr())
+  let cBalBAfter = accountBalance(assetIdB.assetIdFromStr())
+  let (tokensAmountA, tokensAmountB) = (cBalAAfter - cBalABefore, cBalBAfter - cBalBBefore)
+  let (toUserA, toUserB) = 
+    if debt > 0 then 
+      let amountToGetEx = 
+        if borrowAsset == assetIdA && debt > tokensAmountA then 
+          debt - tokensAmountA
+        else if borrowAsset == assetIdB && debt > tokensAmountB then
+          debt - tokensAmountB
+        else 0
+      strict exInv = if amountToGetEx > 0 then exchangeDirectly(pType, pool, assetIdA, assetIdB, balA - tokensAmountA, balB - tokensAmountB, amountToGetEx, borrowAsset) else nil
+      let cBalAAfterRepay = accountBalance(assetIdA.assetIdFromStr())
+      let cBalBAfterRepay = accountBalance(assetIdB.assetIdFromStr())
+      if borrowAsset == assetIdA then
+        (cBalAAfterRepay - cBalABefore - debt, cBalBAfterRepay - cBalBBefore)
+      else
+        (cBalAAfterRepay - cBalABefore, cBalBAfterRepay - cBalBBefore - debt)
+    else
+      (tokensAmountA, tokensAmountB)
+  (toUserA, assetIdA, toUserB, assetIdB, cBalAAfter, cBalBAfter, shareId)
+}
+
+func userCanWithdrawShareCalc(user: String, pool:String, posId: String, borrowed: Boolean) = {
+  let pAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserPosition).valueOrErrorMessage("Unknown position")
+  let userInterest = this.getIntegerValue(pool + "_" + user + "_" + posId + kUserPositionInterest)
+  let poolInterest = if borrowed then
+      this.getIntegerValue(pool + kPoolInterestLoan)
+    else 
+      this.getIntegerValue(pool + kPoolInterestNoLoan)
+  pAmount + fraction(pAmount, poolInterest - userInterest, SCALE10)
+}
+
+func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean) = {
+  let pAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserPosition).valueOrErrorMessage("Unknown position")
+  let borrowAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserBorrowAmount).valueOrElse(0)
+  let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, borrowAmount > 0)
+  let poolTotalShare = getPoolTotalShare(pool)
+  let userAddr = user.fromBase58String().Address()
+  let borrowAsset = this.getString(pool + "_" + user + "_" + posId + kUserBorrowAssetId).valueOrElse("")
+  let debt = if borrowAmount > 0 then 
+      getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posId, borrowAsset], []).exactAs[Int]
+    else
+      0    
+
+  strict (toUserAmountA, assetIdA, toUserAmountB, assetIdB, cBalAAfter, cBalBAfter, shareId) = withdrawAmountCalc(pool, userCanWithdraw, debt, borrowAsset)
+  strict closeDbtInv = if debt > 0 then 
+      getLendSrvAddr().invoke("repayFor", [user + "_" + posId], [AttachedPayment(borrowAsset.assetIdFromStr(), debt)])  
+    else
+      0
+  [
+    DeleteEntry(pool + "_" + user + "_" + posId + kUserPosition),
+    DeleteEntry(pool + "_" + user + "_" + posId + kUserPositionInterest),
+    IntegerEntry(pool + kPoolTotal, poolTotalShare - userCanWithdraw),
+    ScriptTransfer(userAddr, toUserAmountA, assetIdA.assetIdFromStr()),
+    ScriptTransfer(userAddr, toUserAmountB, assetIdB.assetIdFromStr())
+  ] ++ getCursEntries(assetIdA, assetIdB, shareId, [])
+}
+
+func parseRequest(requestId: String) = {
+  let request = this.getString(requestId + kRequestId).valueOrErrorMessage("No request with id " + requestId).split(",")
+  let user = request[0]
+  let pool = request[1]
+  let pmtA = parseIntValue(request[2])
+  let AId = request[3]
+  let pmtB = parseIntValue(request[4])
+  let BId = request[5]
+  let balA = parseIntValue(request[6])
+  let balB = parseIntValue(request[7])
+  let shareId = request[8]
+  let bwAsset = request[9]
+  let bwAmount = parseIntValue(request[10])
+  (user, pool, pmtA, AId, pmtB, BId, balA, balB, shareId, bwAsset, bwAmount)
+}
+
+func calcBorrowAmount(pmtA: Int, pmtB: Int, aId: String, bId: String, leverage: Int, borrowId: String) = {
+  let dPriceA = priceOracleAddr.getIntegerValue(aId + kPriceInOracle)
+  let dPriceB = priceOracleAddr.getIntegerValue(bId + kPriceInOracle)
+  let decPrA = pow(10, 0, getAssetDecimals(aId), 0, 0, DOWN)
+  let decPrB = pow(10, 0, getAssetDecimals(bId), 0, 0, DOWN)
+  let paydInDollar = fraction(dPriceA, pmtA, decPrA) + fraction(dPriceB, pmtB, decPrB)
+  let (borrowPrice, borrowDecPr) = if borrowId == aId then (dPriceA, decPrA) else (dPriceB, decPrB)
+  fraction(fraction(paydInDollar, leverage - 100, 100), borrowDecPr, borrowPrice) 
+}
+
+func parseReplenishPmts(pmts: List[AttachedPayment], AId: String, BId: String) = {
+  if size(pmts) == 2 then
+      if pmts[0].assetId.assetIdToStr() != AId then throw("Wrong payment asset A") else
+      if pmts[1].assetId.assetIdToStr() != BId then throw("Wrong payment asset B") else
+      (pmts[0].amount, AId, pmts[1].amount, BId)
+    else if size(pmts) == 1 then
+      if pmts[0].assetId.assetIdToStr() == AId then (pmts[0].amount, AId, 0, BId) else
+      if pmts[0].assetId.assetIdToStr() == BId then (0, AId, pmts[0].amount, BId) else
+      throw("Wrong payment")
+    else throw("One or two payments expected")
+}
+
+func calcPriceImpact(balA:Int, balB:Int, newBalA:Int, newBalB:Int) = {
+  let pri = (SCALE8 - fraction(balB.fraction(SCALE8, balA), SCALE8, newBalB.fraction(SCALE8, newBalA))) * 100
+  if pri < 0 then pri * (-1) else pri
+}
+
+########READONLY FUNCTIONS############
+@Callable(i)
+func getShareAssetPriceREADONLY(shareId: String) = {
+  let sharePrices = getSharePrice(shareId)
+  ([], sharePrices)
+}
+
+@Callable(i)
+func getUserPositionShareAmountREADONLY(user: String, posNum: String) = {
+  let pool = this.getString(user + "_" + posNum + kUserPositionPool).valueOrErrorMessage("Unknown position")
+  let borrowAmount = this.getIntegerValue(pool + "_" + user + "_" + posNum + kUserBorrowAmount)
+  let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posNum, borrowAmount > 0)
+  ([], userCanWithdraw)
+}
+
+#max 20 pos
+@Callable(i)
+func getUserPositionInDollarsREADONLY(user: String, pools: List[String], posNum: List[String]) = {
+  func userPos(a: (List[Int], List[Int], Int), pool: String) = {
+    let (totalPos, posDebt, index) = a
+    let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+    let (AId, BId, balA, balB, shareId) = getPoolData(Address(pool.fromBase58String()), pType)
+    let borrowAmount = this.getInteger(pool + "_" + user + "_" + posNum[index] + kUserBorrowAmount).valueOrElse(0)
+    let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posNum[index], borrowAmount > 0)
+    let sharePrices = getSharePrice(shareId)
+    let decPrShare = pow(10, 0, getAssetDecimals(shareId), 0, 0, DOWN)
+    let shareD = fraction(userCanWithdraw, sharePrices, decPrShare)
+    if borrowAmount == 0 then 
+      (totalPos :+ shareD, posDebt :+ 0, index + 1) 
+    else 
+      let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posNum[index] + kUserBorrowAssetId)
+      let debt = getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posNum[index], borrowAsset], []).exactAs[Int]
+      let borrowAssetPrice = priceOracleAddr.getIntegerValue(borrowAsset + kPriceInOracle)
+      let decPrBorrowId = pow(10, 0, getAssetDecimals(borrowAsset), 0, 0, DOWN)
+      let debtD = fraction(debt, borrowAssetPrice, decPrBorrowId)
+      (totalPos :+ shareD, posDebt :+ debtD, index + 1) 
+  }
+  let (pos, debt) = FOLD<20>(pools, ([], [], 0), userPos)
+  ([], (pos, debt))
+}
+########END READONLY FUNCTIONS############
+
+
+@Callable(i)
+func replenish(pool: String, leverage: Int, borrowId: String) = {
+  if leverage < 100 || leverage > 300 then throw("Leverage can't be <100 and >300") else
+  if !this.getBooleanValue(pool + kPoolCanBorrow) && leverage > 100 then throw("You can't borrow in this pool") else
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+  let (AId, BId, balA, balB, shareId) = getPoolData(Address(pool.fromBase58String()), pType)
+  let (pmtA, pmtAssetA, pmtB, pmtAssetB) = parseReplenishPmts(i.payments, AId, BId)
+  let user = i.caller.toString()
+    
+  let newPosNum = getNewUserPositionNumber(user)
+  if leverage > 100 then 
+    let borrowAmount = calcBorrowAmount(pmtA, pmtB, pmtAssetA, pmtAssetB, leverage, borrowId) 
+    let request = makeString([
+        user,
+        pool,
+        pmtA.toString(),
+        pmtAssetA,
+        pmtB.toString(),
+        pmtAssetB,
+        balA.toString(),
+        balB.toString(),
+        shareId,
+        borrowId,
+        borrowAmount.toString()
+      ], ",")
+    
+    strict newRequestId = this.invoke("createNewRequest", [request], []).exactAs[Int]
+    
+    let args = [
+      user + "_" + newPosNum.toString(),
+      shareId,
+      borrowId,
+      borrowAmount,
+      this.toString(),
+      "replenishFromLand",
+      newRequestId.valueOrErrorMessage("Can't create new request").toString()
+    ]
+    strict inv = getLendSrvAddr().reentrantInvoke("flashPosition", args, [])
+    let userStaked = this.getIntegerValue(pool + "_" + user + "_" + newPosNum.toString() + kUserPosition)
+    strict (newBalA, newBalB) = getPoolBalances(Address(pool.fromBase58String()), pType, AId, BId)
+    let prImpact = calcPriceImpact(balA, balB, newBalA, newBalB)
+    let (wAmountA, wAmountB) = calcWithdrawLPFromPoolVirt(Address(pool.fromBase58String()), pType, shareId, userStaked)
+    ([], [prImpact, wAmountA, wAmountB])
+  else
+    let (userStaked, axlyFee) = replenishByType(pType, pool, NO_LOAN_FEE, pmtA, AId, pmtB, BId, balA, balB, shareId) 
+    strict (newBalA, newBalB) = getPoolBalances(Address(pool.fromBase58String()), pType, AId, BId)
+    let prImpact = calcPriceImpact(balA, balB, newBalA, newBalB)
+    let (wAmountA, wAmountB) = calcWithdrawLPFromPoolVirt(Address(pool.fromBase58String()), pType, shareId, userStaked)
+    (replenishEntries(pool, user, userStaked, axlyFee, newPosNum, shareId, pType, false) 
+    ++ getCursEntries(AId, BId, shareId, [wAmountA.toString(), wAmountB.toString()]),
+    [prImpact, wAmountA, wAmountB]
+    )
+}
+
+@Callable(i)
+func withdraw(pool: String, posId: Int) = {
+  withdrawToUser(i.caller.toString(), pool, posId.toString(), false)
+}
+
+@Callable(i) 
+func createUpdateStopLoss(posId: Int, poolId: String, assetId: String, price: Int) = {
+  let tokenOraclePrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
+  if !this.getInteger(poolId + "_" + i.caller.toString() + "_" + posId.toString() + kUserPosition).isDefined() then throw("There are no user position") else
+  if price <= 0 then throw("Price must be greater than 0") else
+  if tokenOraclePrice < price then throw("Price must be less than current token price") else
+  [
+    IntegerEntry(i.caller.toString() + "_" + posId.toString() + "_" + poolId + "_" + assetId + kUserStopLoss, price)
+  ]
+}
+
+@Callable(i) 
+func deleteStopLoss(posId: Int, poolId: String, assetId: String) = {
+  if !this.getInteger(i.caller.toString() + "_" + posId.toString() + "_" + poolId + "_" + assetId + kUserStopLoss).isDefined() then throw("No entry") else
+  [DeleteEntry(i.caller.toString() + "_" + posId.toString() + "_" + poolId + "_" + assetId + kUserStopLoss)]
+}
+
+@Callable(i)
+func init(
+  moneyBoxAddr: String, 
+  sfFarmingAddr: String,
+  lendAddr: String,
+  priceOracleAddr: String,
+  keeperExContract: String,
+  wxSwapContract: String,
+  swopAssetId: String,
+  wxAssetId: String,
+  adminPubKey: String
+) = {
+
+  if getString(kMoneyBox).isDefined() then throw("Already inited") else
+  [
+    StringEntry(kMoneyBox, moneyBoxAddr),
+    StringEntry(kSFFarmingAddr, sfFarmingAddr),
+    StringEntry(kLendService, lendAddr),
+    StringEntry(kPriceOracle, priceOracleAddr),
+    StringEntry(kExContract, keeperExContract),
+    StringEntry(kWxSwapContract, wxSwapContract),
+    StringEntry(kSwopId, swopAssetId),
+    StringEntry(kWxId, wxAssetId),
+    StringEntry(kAdminCallPK, adminPubKey)
+  ]
+}
+
+########## Self call functions #######
+
+@Callable(i)
+func createNewRequest(params: String) = isSelfCall(i).valueOrElse({
+  let newRequestId = this.getInteger(kRequestIter).valueOrElse(0) + 1
+  (
+    [
+      StringEntry(newRequestId.toString() + kRequestId, params),
+      IntegerEntry(kRequestIter, newRequestId)
+    ], 
+    newRequestId
+  )
+})
+
+##########ADMIN FUNCTIONS###############
+
+@Callable(i)
+func replenishFromLand(requestId: String) = isLandCall(i).valueOrElse({
+  let (user, pool, pmtA, AId, pmtB, BId, balA, balB, shareId, bwAsset, bwAmount) = parseRequest(requestId)
+  if i.payments.size() != 1 then throw("Wrong payment size") else
+  if assetIdToStr(i.payments[0].assetId) != bwAsset || i.payments[0].amount != bwAmount then throw("Wrong payment") else
+  let (pmtAllA, pmtAllB) = if AId == bwAsset then (pmtA + i.payments[0].amount, pmtB) else (pmtA, pmtB + i.payments[0].amount)
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Unknown pool")
+  let (userStaked, axlyFee) = replenishByType(pType, pool, LOAN_FEE, pmtAllA, AId, pmtAllB, BId, balA, balB, shareId) 
+  let posNum = getNewUserPositionNumber(user)
+  let borrowEntries = [
+    IntegerEntry(pool + "_"  + user + "_" + posNum.toString() + kUserBorrowAmount, bwAmount),
+    StringEntry(pool + "_"  + user + "_" + posNum.toString() + kUserBorrowAssetId, bwAsset)
+  ]
+  let entries = replenishEntries(pool, user, userStaked, axlyFee, posNum, shareId, pType, true)
+  let (wAmountA, wAmountB) = calcWithdrawLPFromPoolVirt(Address(pool.fromBase58String()), pType, shareId, userStaked)
+  ( 
+    entries ++ 
+    getCursEntries(AId, BId, shareId, [wAmountA.toString(), wAmountB.toString()]) ++ 
+    borrowEntries :+ 
+    DeleteEntry(requestId + kRequestId), 
+    userStaked
+  )
+})
+
+@Callable(i) 
+func liquidate(user: String, posId: String, liquidateAmount: Int) = isLandCall(i).valueOrElse({
+  let pool = this.getString(user + "_" + posId + kUserPositionPool).valueOrErrorMessage("no position")
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+  let (AId, BId, balA, balB, shareId) = getPoolData(Address(pool.fromBase58String()), pType)
+  let amount = unstakeLP(pool, pType, shareId, liquidateAmount)
+  let borrowAmount = this.getIntegerValue(pool + "_" + user + "_" + posId + kUserBorrowAmount)
+  let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posId + kUserBorrowAssetId)
+  let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, borrowAmount > 0)
+  if borrowAmount == 0 then throw("You can't liquidate position without borrow") else 
+  [
+    IntegerEntry(pool + "_" + user + "_" + posId + kUserPositionInterest, this.getIntegerValue(pool + kPoolInterestLoan)),
+    IntegerEntry(pool + kPoolTotalLoan, getPoolTotalShareWithLoan(pool) - liquidateAmount),
+    IntegerEntry(pool + kPoolTotal, getPoolTotalShare(pool) - liquidateAmount),
+    IntegerEntry(pool + "_" + user + "_" + posId + kUserPosition, userCanWithdraw - liquidateAmount),
+    ScriptTransfer(i.caller, amount, shareId.fromBase58String())
+  ]
+  
+})
+
+@Callable(i) 
+func stopLoss(user: String, posId: Int, pool: String, assetId: String) = isAdminCall(i).valueOrElse({
+  let tokenOraclePrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
+  if !this.getInteger(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss).isDefined() then throw("No entry") else
+  withdrawToUser(i.caller.toString(), pool, posId.toString(), true) :+ DeleteEntry(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss)
+})
+
+@Callable(i)
+func capitalizeExKeeper(
+  pool: String, 
+  type: String, 
+  tokenToId: String, 
+  amountToExchange: Int, 
+  claim: Boolean,
+  amountsIn: List[Int], 
+  addresses: List[String], 
+  assetsToReceive: List[String], 
+  estReceived: List[Int], 
+  slippageTolerance: Int, 
+  minReceived: Int, 
+  options: List[String]
+) = isAdminCall(i).valueOrElse({
+  let (claimedAmount, claimedAsset) = 
+    if claim then claimFarmed(type, pool) 
+    else 
+      let claimedAsset = if type == SF_POOL then SWOPID else WXID
+      (amountToExchange, claimedAsset)
+  let exchangedAmount = exchangeKeeper(tokenToId, amountToExchange, claimedAsset, amountsIn, addresses, assetsToReceive, estReceived, slippageTolerance, minReceived, options)
+  let change = claimedAmount - amountToExchange
+  let changeEntry = if change > 0 then [IntegerEntry(pool + kPoolCapChange, change + this.getInteger(pool + kPoolCapChange).valueOrElse(0))] else []
+  capitalize(pool, type, tokenToId, exchangedAmount) ++ changeEntry 
+})
+
+@Callable(i)
+func capitalizeExPuzzle(
+  pool: String, 
+  type: String, 
+  tokenToId: String,
+  amountToExchange: Int, 
+  claim: Boolean,
+  routesStr: String, 
+  minToReceive: Int,
+  options: List[String]
+) = isAdminCall(i).valueOrElse({
+  let (claimedAmount, claimedAsset) = 
+    if claim then claimFarmed(type, pool) 
+    else 
+      let claimedAsset = if type == SF_POOL then SWOPID else WXID
+      (amountToExchange, claimedAsset)
+  let exchangedAmount = exchangePuzzle(tokenToId, amountToExchange, claimedAsset, routesStr,  minToReceive, options)
+  let change = claimedAmount - amountToExchange
+  let changeEntry = if change > 0 then [IntegerEntry(pool + kPoolCapChange, change + this.getInteger(pool + kPoolCapChange).valueOrElse(0))] else []
+  capitalize(pool, type, tokenToId, exchangedAmount) ++ changeEntry
+})
+
+@Callable(i)
+func capitalizeExSwopFi(
+  pool: String, 
+  type: String, 
+  tokenToId: String,
+  amountToExchange: Int, 
+  claim: Boolean,
+  exchangers: List[String],
+  exchangersType: List[String],
+  args1: List[String],
+  args2: List[String],
+  routingAssetsKeys: List[String],
+  minAmountToReceive: Int,
+  options: List[String]
+) = isAdminCall(i).valueOrElse({
+  let (claimedAmount, claimedAsset) = 
+    if claim then claimFarmed(type, pool) 
+    else 
+      let claimedAsset = if type == SF_POOL then SWOPID else WXID
+      (amountToExchange, claimedAsset)
+  let exchangedAmount = exchangeSwopFi(tokenToId, amountToExchange, claimedAsset, exchangers,exchangersType,args1,args2,routingAssetsKeys,minAmountToReceive,options)
+  let change = claimedAmount - amountToExchange
+  let changeEntry = if change > 0 then [IntegerEntry(pool + kPoolCapChange, change + this.getInteger(pool + kPoolCapChange).valueOrElse(0))] else []
+  capitalize(pool, type, tokenToId, exchangedAmount) ++ changeEntry
+})
+
+@Callable(i)
+func initNewPool(type: String, poolAddr: String, inFeeNoLoan: Int, inFeeLoan: Int, capFeeNoLoan:Int, capFeeWithLoan:Int, stoplossFeeNoLoan:Int, stoplossFeeWithLoan:Int, canBorrow: Boolean) = isAdminCall(i).valueOrElse({
+  if type != SF_POOL && type != WX_POOL then throw("Wrong type") else
+  let (aId, bId, aBal, bBal, shareId) = getPoolData(poolAddr.fromBase58String().Address(), type)
+  [
+    IntegerEntry(poolAddr + kAxlyInFeeWithoutLoan, inFeeNoLoan),
+    IntegerEntry(poolAddr + kAxlyInFeeWithLoan, inFeeLoan),
+    IntegerEntry(poolAddr + kAxlyNoLoanCapFee, capFeeNoLoan),
+    IntegerEntry(poolAddr + kAxlyWithLoanCapFee, capFeeWithLoan),
+    IntegerEntry(poolAddr + kAxlyStopLossNoLoanFee, stoplossFeeNoLoan),
+    IntegerEntry(poolAddr + kAxlyStopLossLoanFee, stoplossFeeWithLoan),
+    IntegerEntry(poolAddr + kPoolInterestLoan, 0),
+    IntegerEntry(poolAddr + kPoolInterestNoLoan, 0),
+    StringEntry(kPool + poolAddr, type),
+    StringEntry(shareId + kSharePool, poolAddr),
+    BooleanEntry(poolAddr + kPoolCanBorrow, canBorrow)
+  ]
+})
+
+@Verifier(tx)
+func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+        
