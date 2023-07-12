@@ -942,4 +942,3 @@ func initNewPool(type: String, poolAddr: String, inFeeNoLoan: Int, inFeeLoan: In
 
 @Verifier(tx)
 func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
-        
