@@ -687,7 +687,8 @@ func claimAndCheckAmntEx(pool: String, pType: String, claim: Boolean, amountToEx
           WXID
         else unknownPoolType()
       (amountToExchange, claimedAsset)
-    if amountToExchange > claimAmount + change then throw("To big amount to exchange") else
+    let bal = accountBalance(claimAsset)
+    if amountToExchange > claimAmount + change || amountToExchange > bal  then throw("To big amount to exchange") else
     (claimAmount, claimAsset)
 }
 
