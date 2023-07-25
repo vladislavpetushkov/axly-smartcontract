@@ -347,9 +347,19 @@ func calcAmountToPaySF(pool: String, assetIdA:String, assetIdB:String, balA:Int,
     (assetToPay, amountToPay)
 }
 
+func getWXSwapFees(pool: String) = {
+  let poolAddr = pool.addressFromStringValue()
+  let fContract = poolAddr.getString("%s__factoryContract").valueOrErrorMessage("Can't get WX factory contract addr").addressFromStringValue()
+  let poolFeeDefault = wxSwapContract.getInteger("%s__poolFee").value()
+  let protocolFeeDefault = wxSwapContract.getInteger("%s__protocolFee").value()
+  match fContract.invoke("getSwapFeeREADONLY", [poolAddr.toString()], []) {
+    case fees: (Int, Int) => (fees._1, fees._2)
+    case _ => (poolFeeDefault, protocolFeeDefault)
+  }
+}
+
 func calcAmountToPayWX(pool: String, assetIdA:String, assetIdB:String, balA:Int, balB:Int, amountTokenToGet: Int, assetTokenToGet: String) = {
-  let prFee = wxSwapContract.getIntegerValue("%s__protocolFee")
-  let pFee = wxSwapContract.getIntegerValue("%s__poolFee")
+  let (pFee, prFee) = getWXSwapFees(pool)
   let feeScale = toBigInt(100000000)
   let (amountToPay, assetToPay) = 
     if assetTokenToGet == assetIdA then
@@ -375,8 +385,8 @@ func exchangeDirectly(pType: String, pool: String, assetIdA:String, assetIdB:Str
 func calcWithdrawLPFromPoolVirt(poolAddr:Address, pType: String, shareId: String, userCanWithdraw:Int) = {
   let (amountA, amountB) = 
     if pType == SF_POOL then 
-      strict inv = poolAddr.invoke("callFunction", ["withdrawREADONLY", [userCanWithdraw.toString()]], []).exactAs[(Int, Int)]
-      (inv._1, inv._2)
+      strict inv = poolAddr.invoke("callFunction", ["withdrawREADONLY", [userCanWithdraw.toString()]], []).exactAs[List[Any]]
+      (inv[0].exactAs[Int], inv[1].exactAs[Int])
     else if pType == WX_POOL then
       strict inv = poolAddr.invoke("evaluateGetREADONLY", [shareId, userCanWithdraw], []).exactAs[String].split("__")
       (inv[1].parseIntValue(), inv[2].parseIntValue())
@@ -604,14 +614,15 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
   let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, borrowAmount > 0)
   let poolTotalShare = getPoolTotalShare(pool)
   let userAddr = user.fromBase58String().Address()
-  let borrowAsset = this.getString(pool + "_" + user + "_" + posId + kUserBorrowAssetId).valueOrElse("")
-  let (debt, feeType) = if borrowAmount > 0 then 
+  let (debt, feeType, borrowAsset) = if borrowAmount > 0 then 
+      let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posId + kUserBorrowAssetId)
       (
         getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posId, borrowAsset], []).exactAs[Int],
-        STOPLOSS_LOAN
+        STOPLOSS_LOAN,
+        borrowAsset
       )
     else
-      (0, STOPLOSS_FEE_NO_LOAN)    
+      (0, STOPLOSS_FEE_NO_LOAN, "")    
   let stopLossFee = if stopLoss then fraction(userCanWithdraw, getAxlyFee(pool, feeType), FEE_SCALE6) else 0
 
   strict (toUserAmountA, assetIdA, toUserAmountB, assetIdB, shareId) = withdrawAmountCalc(pool, userCanWithdraw - stopLossFee, debt, borrowAsset, stopLossFee)
@@ -619,7 +630,7 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
       getLendSrvAddr().invoke("repayFor", [user + "_" + posId], [AttachedPayment(borrowAsset.assetIdFromStr(), debt)])  
     else
       0
-  [
+  let entries = [
     DeleteEntry(pool + "_" + user + "_" + posId + kUserPosition),
     DeleteEntry(user + "_" + posId + kUserPositionPool),
     DeleteEntry(pool + "_" + user + "_" + posId + kUserBorrowAmount),
@@ -630,6 +641,7 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
     ScriptTransfer(userAddr, toUserAmountB, assetIdB.assetIdFromStr()),
     ScriptTransfer(moneyBox, stopLossFee, shareId.fromBase58String())
   ] ++ getCursEntries(assetIdA, assetIdB, shareId, [])
+  (entries, [toUserAmountA, toUserAmountB])
 }
 
 func parseRequest(requestId: String) = {
@@ -709,38 +721,43 @@ func getUserPositionShareAmountREADONLY(user: String, posNum: String) = {
 
 #max 20 pos
 @Callable(i)
-func getUserPositionInDollarsREADONLY(user: String, pools: List[String], posNum: List[String]) = {
-  func userPos(a: (List[Int], List[Int], Int), pool: String) = {
-    let (totalPos, posDebt, index) = a
+func getUserPositionREADONLY(user: String, pools: List[String], posNum: List[String]) = {
+  func userPos(a: (List[Int], List[Int], List[Int], List[Int], List[Int], Int), pool: String) = {
+    let (wAmountsA, wAmountsB, debts, eqWAmountsA, eqWAmountsB, index) = a
+    if !this.getInteger(pool + "_" + user + "_" + posNum[index] + kUserPosition).isDefined() then (wAmountsA:+ 0, wAmountsB:+ 0, debts:+0, eqWAmountsA:+0, eqWAmountsB:+0, index + 1) else
     let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
     let (AId, BId, balA, balB, shareId) = getPoolData(Address(pool.fromBase58String()), pType)
     let borrowAmount = this.getInteger(pool + "_" + user + "_" + posNum[index] + kUserBorrowAmount).valueOrElse(0)
-    if !this.getInteger(pool + "_" + user + "_" + posNum[index] + kUserPosition).isDefined() then (totalPos :+ 0, posDebt :+ 0, index + 1) else
     let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posNum[index], borrowAmount > 0)
-    let sharePrices = getSharePrice(shareId)
-    let decPrShare = pow(10, 0, getAssetDecimals(shareId), 0, 0, DOWN)
-    let shareD = fraction(userCanWithdraw, sharePrices, decPrShare)
-    if borrowAmount == 0 then 
-      (totalPos :+ shareD, posDebt :+ 0, index + 1) 
-    else 
+    let (wAmountA, wAmountB) = calcWithdrawLPFromPoolVirt(Address(pool.fromBase58String()), pType, shareId, userCanWithdraw)
+    if borrowAmount > 0 then 
       let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posNum[index] + kUserBorrowAssetId)
-      let debt = getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posNum[index], borrowAsset], []).exactAs[Int]
-      let borrowAssetPrice = priceOracleAddr.getIntegerValue(borrowAsset + kPriceInOracle)
-      let decPrBorrowId = pow(10, 0, getAssetDecimals(borrowAsset), 0, 0, DOWN)
-      let debtD = fraction(debt, borrowAssetPrice, decPrBorrowId)
-      (totalPos :+ shareD, posDebt :+ debtD, index + 1) 
+      strict debt = getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posNum[index], borrowAsset], []).exactAs[Int]
+      #Equity
+      let (assetToPay, amountToPay) = 
+        if pType == SF_POOL then
+          calcAmountToPaySF(pool, AId, BId, balA, balB, debt, borrowAsset)
+        else if pType == WX_POOL then
+          calcAmountToPayWX(pool, AId, BId, balA, balB, debt, borrowAsset)
+        else unknownPoolType()
+      let (eqWAmountA, eqWAmountB) = if(assetToPay == BId) then (wAmountA - debt, wAmountB - amountToPay) else (wAmountA - amountToPay, wAmountB - debt)
+      (wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, debts:+ debt, eqWAmountsA:+eqWAmountA, eqWAmountsB:+eqWAmountB, index + 1)
+    else
+      (wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, debts, wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, index + 1)
   }
-  let (pos, debt) = FOLD<20>(pools, ([], [], 0), userPos)
-  ([], (pos, debt))
+  let (wAmountsA, wAmountsB, debts, eqWAmountsA, eqWAmountsB) = FOLD<20>(pools, ([], [], [], [], [], 0), userPos)
+  ([], (wAmountsA, wAmountsB, debts, eqWAmountsA, eqWAmountsB))
 }
 ########END READONLY FUNCTIONS############
 
 
 @Callable(i)
 func replenish(pool: String, leverage: Int, borrowId: String) = isActiveForUsers().valueOrElse({
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+  if !isPoolActive(pool, pType) then throw("Pool not active at this moment") else
   if leverage < 100 || leverage > 300 then throw("Leverage can't be <100 and >300") else
   if !this.getBooleanValue(pool + kPoolCanBorrow) && leverage > 100 then throw("You can't borrow in this pool") else
-  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+
   let (AId, BId, balA, balB, shareId) = getPoolData(Address(pool.fromBase58String()), pType)
   if borrowId != AId && borrowId != BId then throw("Wrong borrow asset") else
   let (pmtA, pmtB) = parseReplenishPmts(i.payments, AId, BId)
@@ -793,12 +810,16 @@ func replenish(pool: String, leverage: Int, borrowId: String) = isActiveForUsers
 
 @Callable(i)
 func withdraw(pool: String, posId: Int) = isActiveForUsers().valueOrElse({
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Pool is not inited")
+  if !isPoolActive(pool, pType) then throw("Pool not active at this moment") else
   withdrawToUser(i.caller.toString(), pool, posId.toString(), false)
 })
 
 @Callable(i) 
 func createUpdateStopLoss(posId: Int, poolId: String, assetId: String, price: Int) = isActiveForUsers().valueOrElse({
   let tokenOraclePrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
+  let pType = this.getString(kPool + poolId).valueOrErrorMessage("Pool is not inited")
+  if !isPoolActive(poolId, pType) then throw("Pool not active at this moment") else
   if !this.getInteger(poolId + "_" + i.caller.toString() + "_" + posId.toString() + kUserPosition).isDefined() then throw("There are no user position") else
   if price <= 0 then throw("Price must be greater than 0") else
   if tokenOraclePrice < price then throw("Price must be less than current token price") else
@@ -809,6 +830,8 @@ func createUpdateStopLoss(posId: Int, poolId: String, assetId: String, price: In
 
 @Callable(i) 
 func deleteStopLoss(posId: Int, poolId: String, assetId: String) = isActiveForUsers().valueOrElse({
+  let pType = this.getString(kPool + poolId).valueOrErrorMessage("Pool is not inited")
+  if !isPoolActive(poolId, pType) then throw("Pool not active at this moment") else
   if !this.getInteger(i.caller.toString() + "_" + posId.toString() + "_" + poolId + "_" + assetId + kUserStopLoss).isDefined() then throw("No entry") else
   [DeleteEntry(i.caller.toString() + "_" + posId.toString() + "_" + poolId + "_" + assetId + kUserStopLoss)]
 })
@@ -824,9 +847,16 @@ func init(
   swopAssetId: String,
   wxAssetId: String,
   adminPubKey: String
-) = {
-  if i.caller.toString() != "3PG42y6FgT8zM3uX5tEDxJF5rqX8AKGJRAR" then throw("Only admin can call this function") else
+) = isSelfCall(i).valueOrElse({
   if getString(kAdminCallPK).isDefined() then throw("Already inited") else
+  if !moneyBoxAddr.addressFromString().isDefined() then throw("moneyBoxAddr is not correct address") else
+  if !sfFarmingAddr.addressFromString().isDefined() then throw("sfFarmingAddr is not correct address") else
+  if !lendAddr.addressFromString().isDefined() then throw("lendAddr is not correct address") else
+  if !priceOracleAddr.addressFromString().isDefined() then throw("priceOracleAddr is not correct address") else
+  if !keeperExContract.addressFromString().isDefined() then throw("keeperExContract is not correct address") else
+  if !swopAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
+  if !wxAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
+  if adminPubKey.fromBase58String().size() != 32 then throw("adminPubKey is not correct") else
   [
     StringEntry(kMoneyBox, moneyBoxAddr),
     StringEntry(kSFFarmingAddr, sfFarmingAddr),
@@ -838,7 +868,7 @@ func init(
     StringEntry(kWxId, wxAssetId),
     StringEntry(kAdminCallPK, adminPubKey)
   ]
-}
+})
 
 ########## Self call functions #######
 
@@ -910,9 +940,13 @@ func stopLoss(user: String, posId: Int, pool: String, assetId: String) =
 isActive().valueOrElse(
 isAdminCall(i).valueOrElse({
   let tokenOraclePrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
-  if tokenOraclePrice > tokenOraclePrice then throw("Token price greater stop loss price") else
-  if !this.getInteger(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss).isDefined() then throw("No entry") else
-  withdrawToUser(user, pool, posId.toString(), true) :+ DeleteEntry(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss)
+  let stopLossPrice = this.getInteger(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss).valueOrErrorMessage("No entry")
+  if tokenOraclePrice > stopLossPrice then throw("Token price greater stop loss price") else
+  let res = withdrawToUser(user, pool, posId.toString(), true)
+   (
+     res._1:+ DeleteEntry(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss),
+     res._2
+   )
 }))
 
 @Callable(i)
@@ -936,7 +970,7 @@ isAdminCall(i).valueOrElse({
   let (claimedAmount, claimedAsset) = claimAndCheckAmntEx(pool, pType, claim, amountToExchange, change)
   let exchangedAmount = exchangeKeeper(tokenToId, amountToExchange, claimedAsset, amountsIn, addresses, assetsToReceive, estReceived, slippageTolerance, minReceived, options)
   let newChange = claimedAmount + change - amountToExchange
-  let changeEntry = if newChange >= 0 then [IntegerEntry(pool + kPoolCapChange, newChange)] else []
+  let changeEntry = if newChange >= 0 then [IntegerEntry(pool + kPoolCapChange, newChange)] else throw("Negative change")
   capitalize(pool, pType, tokenToId, exchangedAmount) ++ changeEntry 
 }))
 
@@ -1028,51 +1062,51 @@ func shutdown() = isAdminCall(i).valueOrElse({
 @Callable(i)
 func activateForUsers() = isAdminCall(i).valueOrElse({
   if this.getBoolean(kActiveUsers).valueOrElse(true) then throw("dApp already active for users") else
-  [BooleanEntry(kActive, true)]
+  [BooleanEntry(kActiveUsers, true)]
 })
 
 @Callable(i)
 func shutdownForUsers() = isAdminCall(i).valueOrElse({
   if !this.getBoolean(kActiveUsers).valueOrElse(true) then throw("dApp already shutdown for users") else
-  [BooleanEntry(kActive, false)]
+  [BooleanEntry(kActiveUsers, false)]
 })
 
 @Callable(i)
 func activateSF() = isAdminCall(i).valueOrElse({
   if this.getBoolean(SF_POOL + kActiveSFWX).valueOrElse(true) then throw("SWOPFI already active") else
-  [BooleanEntry(kActive, true)]
+  [BooleanEntry(SF_POOL + kActiveSFWX, true)]
 })
 
 @Callable(i)
 func shutdownSF() = isAdminCall(i).valueOrElse({
   if !this.getBoolean(SF_POOL + kActiveSFWX).valueOrElse(true) then throw("SWOPFI already shutdown") else
-  [BooleanEntry(kActive, false)]
+  [BooleanEntry(SF_POOL + kActiveSFWX, false)]
 })
 
 @Callable(i)
 func activateWX() = isAdminCall(i).valueOrElse({
   if this.getBoolean(WX_POOL + kActiveSFWX).valueOrElse(true) then throw("WX already active") else
-  [BooleanEntry(kActive, true)]
+  [BooleanEntry(WX_POOL + kActiveSFWX, true)]
 })
 
 @Callable(i)
 func shutdownWX() = isAdminCall(i).valueOrElse({
   if !this.getBoolean(WX_POOL + kActiveSFWX).valueOrElse(true) then throw("WX already shutdown") else
-  [BooleanEntry(kActive, false)]
+  [BooleanEntry(WX_POOL + kActiveSFWX, false)]
 })
 
 @Callable(i)
 func activatePool(pool:String) = isAdminCall(i).valueOrElse({
   if !this.getString(kPool + pool).isDefined() then throw("Unknown pool") else
   if this.getBoolean(pool + kPoolActive).valueOrElse(true) then throw("Pool already active") else
-  [BooleanEntry(kActive, true)]
+  [BooleanEntry(pool + kPoolActive, true)]
 })
 
 @Callable(i)
 func shutdownPool(pool:String) = isAdminCall(i).valueOrElse({
   if !this.getString(kPool + pool).isDefined() then throw("Unknown pool") else
   if !this.getBoolean(pool + kPoolActive).valueOrElse(true) then throw("Pool already shutdown") else
-  [BooleanEntry(kActive, false)]
+  [BooleanEntry(pool + kPoolActive, false)]
 })
 
 @Verifier(tx)
