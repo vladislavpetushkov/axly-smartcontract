@@ -560,44 +560,6 @@ func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int)
   ] ++ getCursEntries(AId, BId, shareId, [])
 }
 
-func withdrawAmountCalc(pool:String, userCanWithdraw:Int, debt: Int, borrowAsset: String, stopLossFee: Int) = {
-  let poolAddr = Address(pool.fromBase58String())
-  let pType = this.getString(kPool + pool).valueOrErrorMessage("Unknown pool")
-  let (assetIdA, assetIdB, balA, balB, shareId) = getPoolData(poolAddr, pType)
-  strict cBalABefore = accountBalance(assetIdA.assetIdFromStr())
-  strict cBalBBefore = accountBalance(assetIdB.assetIdFromStr())
-  strict inv =  
-    if pType == SF_POOL then 
-      strict inv = unstakeLP(pool, pType, shareId, stopLossFee)
-      poolAddr.invoke("callFunction", ["withdraw", [userCanWithdraw.toString()]], []) 
-    else if pType == WX_POOL then
-      strict inv = unstakeLP(pool, pType, shareId, userCanWithdraw + stopLossFee)
-      poolAddr.invoke("get", [], [AttachedPayment(shareId.assetIdFromStr(), userCanWithdraw)]) 
-    else unknownPoolType()
-
-  let cBalAAfter = accountBalance(assetIdA.assetIdFromStr())
-  let cBalBAfter = accountBalance(assetIdB.assetIdFromStr())
-  let (tokensAmountA, tokensAmountB) = (cBalAAfter - cBalABefore, cBalBAfter - cBalBBefore)
-  let (toUserA, toUserB) = 
-    if debt > 0 then 
-      let amountToGetEx = 
-        if borrowAsset == assetIdA && debt > tokensAmountA then 
-          debt - tokensAmountA
-        else if borrowAsset == assetIdB && debt > tokensAmountB then
-          debt - tokensAmountB
-        else 0
-      strict exInv = if amountToGetEx > 0 then exchangeDirectly(pType, pool, assetIdA, assetIdB, balA - tokensAmountA, balB - tokensAmountB, amountToGetEx, borrowAsset) else nil
-      let cBalAAfterRepay = accountBalance(assetIdA.assetIdFromStr())
-      let cBalBAfterRepay = accountBalance(assetIdB.assetIdFromStr())
-      if borrowAsset == assetIdA then
-        (cBalAAfterRepay - cBalABefore - debt, cBalBAfterRepay - cBalBBefore)
-      else
-        (cBalAAfterRepay - cBalABefore, cBalBAfterRepay - cBalBBefore - debt)
-    else
-      (tokensAmountA, tokensAmountB)
-  (toUserA, assetIdA, toUserB, assetIdB, shareId)
-}
-
 func userCanWithdrawShareCalc(user: String, pool:String, posId: String, borrowed: Boolean) = {
   let pAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserPosition).valueOrErrorMessage("Unknown position")
   let userInterest = this.getIntegerValue(pool + "_" + user + "_" + posId + kUserPositionInterest)
@@ -608,28 +570,65 @@ func userCanWithdrawShareCalc(user: String, pool:String, posId: String, borrowed
   pAmount + fraction(pAmount, poolInterest - userInterest, SCALE10)
 }
 
+func calcStopLossFee(pool: String, isBorrowed: Boolean, stopLoss: Boolean, lpWithdraw: Int) = {
+  let feeType = if isBorrowed then STOPLOSS_LOAN else STOPLOSS_FEE_NO_LOAN
+  if stopLoss then fraction(lpWithdraw, getAxlyFee(pool, feeType), FEE_SCALE6) else 0
+}
+
 func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean) = {
   let pAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserPosition).valueOrErrorMessage("Unknown position")
-  let borrowAmount = this.getInteger(pool + "_" + user + "_" + posId + kUserBorrowAmount).valueOrElse(0)
-  let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, borrowAmount > 0)
+  let isBorrowed = this.getInteger(pool + "_" + user + "_" + posId + kUserBorrowAmount).valueOrElse(0) > 0
+  let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, isBorrowed)
   let poolTotalShare = getPoolTotalShare(pool)
   let userAddr = user.fromBase58String().Address()
-  let (debt, feeType, borrowAsset) = if borrowAmount > 0 then 
-      let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posId + kUserBorrowAssetId)
-      (
-        getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posId, borrowAsset], []).exactAs[Int],
-        STOPLOSS_LOAN,
-        borrowAsset
-      )
-    else
-      (0, STOPLOSS_FEE_NO_LOAN, "")    
-  let stopLossFee = if stopLoss then fraction(userCanWithdraw, getAxlyFee(pool, feeType), FEE_SCALE6) else 0
+  let poolAddr = Address(pool.fromBase58String())
+  let pType = this.getString(kPool + pool).valueOrErrorMessage("Unknown pool")
+  let (idAStr, idBStr, balA, balB, shareId) = getPoolData(poolAddr, pType)
+  let (idA, idB) = (idAStr.assetIdFromStr(), idBStr.assetIdFromStr())
+  let stopLossFee = calcStopLossFee(pool, isBorrowed, stopLoss, userCanWithdraw)
 
-  strict (toUserAmountA, assetIdA, toUserAmountB, assetIdB, shareId) = withdrawAmountCalc(pool, userCanWithdraw - stopLossFee, debt, borrowAsset, stopLossFee)
-  strict closeDbtInv = if debt > 0 then 
-      getLendSrvAddr().invoke("repayFor", [user + "_" + posId], [AttachedPayment(borrowAsset.assetIdFromStr(), debt)])  
+  strict cBalABefore = accountBalance(idA)
+  strict cBalBBefore = accountBalance(idB)
+
+  strict inv =  
+    if pType == SF_POOL then 
+      strict inv = unstakeLP(pool, pType, shareId, stopLossFee)
+      poolAddr.invoke("callFunction", ["withdraw", [userCanWithdraw.toString()]], []) 
+    else if pType == WX_POOL then
+      strict inv = unstakeLP(pool, pType, shareId, userCanWithdraw + stopLossFee)
+      poolAddr.invoke("get", [], [AttachedPayment(shareId.assetIdFromStr(), userCanWithdraw)]) 
+    else unknownPoolType()
+
+  strict cBalAAfter = accountBalance(idA)
+  strict cBalBAfter = accountBalance(idB)
+
+  let (tokensAmountA, tokensAmountB) = (cBalAAfter - cBalABefore, cBalBAfter - cBalBBefore)
+  let (toUserA, toUserB) = 
+    if isBorrowed then 
+      let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posId + kUserBorrowAssetId)
+      strict debt = getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posId, borrowAsset], []).exactAs[Int]
+      
+      let amountToGetEx = 
+        if borrowAsset == idAStr && debt > tokensAmountA then 
+          debt - tokensAmountA
+        else if borrowAsset == idBStr && debt > tokensAmountB then
+          debt - tokensAmountB
+        else 0
+      strict exInv = if amountToGetEx > 0 then exchangeDirectly(pType, pool, idAStr, idBStr, balA - tokensAmountA, balB - tokensAmountB, amountToGetEx, borrowAsset) else nil
+      strict cBalAAfterRepay = accountBalance(idA)
+      strict cBalBAfterRepay = accountBalance(idB)
+      strict closeDbtInv = 
+        if debt > 0 then 
+          getLendSrvAddr().invoke("repayFor", [user + "_" + posId], [AttachedPayment(borrowAsset.assetIdFromStr(), debt)])  
+        else
+          0
+      if borrowAsset == idAStr then
+        (cBalAAfterRepay - cBalABefore - debt, cBalBAfterRepay - cBalBBefore)
+      else
+        (cBalAAfterRepay - cBalABefore, cBalBAfterRepay - cBalBBefore - debt)
     else
-      0
+      (tokensAmountA, tokensAmountB)
+  
   let entries = [
     DeleteEntry(pool + "_" + user + "_" + posId + kUserPosition),
     DeleteEntry(user + "_" + posId + kUserPositionPool),
@@ -637,11 +636,11 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
     DeleteEntry(pool + "_" + user + "_" + posId + kUserBorrowAssetId),
     DeleteEntry(pool + "_" + user + "_" + posId + kUserPositionInterest),
     IntegerEntry(pool + kPoolTotal, poolTotalShare - userCanWithdraw - stopLossFee),
-    ScriptTransfer(userAddr, toUserAmountA, assetIdA.assetIdFromStr()),
-    ScriptTransfer(userAddr, toUserAmountB, assetIdB.assetIdFromStr()),
+    ScriptTransfer(userAddr, toUserA, idA),
+    ScriptTransfer(userAddr, toUserB, idB),
     ScriptTransfer(moneyBox, stopLossFee, shareId.fromBase58String())
-  ] ++ getCursEntries(assetIdA, assetIdB, shareId, [])
-  (entries, [toUserAmountA, toUserAmountB])
+  ] ++ getCursEntries(idAStr, idBStr, shareId, [])
+  (entries, [toUserA, toUserB])
 }
 
 func parseRequest(requestId: String) = {
