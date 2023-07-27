@@ -61,12 +61,15 @@ let kUserStopLoss = "_stopLoss" #with {POSITTION_ID}_{POOLADDR}_{ASSET_ID} prefi
 let kMoneyBox = "axly_money_box"
 let kSFFarmingAddr = "swopfi_farming_addr"
 let kLendService = "lend_service_addr"
-let kAdminCallPK = "admin_call_pub_key"
+let kOperatorCallPK = "admin_call_pub_key"
 let kPriceOracle = "price_oracle"
 let kExContract = "exchange_contract"
 let kWxSwapContract = "wx_swap_contract"
 let kSwopId = "swop_id"
 let kWxId = "wx_id"
+let kAdmin1PK = "admin1_pub_key"
+let kAdmin2PK = "admin2_pub_key"
+let kAdmin3PK = "admin3_pub_key"
 
 
 let moneyBox = Address(this.getString(kMoneyBox).valueOrErrorMessage("No axly moneyBox address").fromBase58String())
@@ -75,14 +78,19 @@ let priceOracleAddr = Address(this.getString(kPriceOracle).valueOrErrorMessage("
 let wxSwapContract = Address(this.getString(kWxSwapContract).valueOrErrorMessage("No wx swap address").fromBase58String())
 let SWOPID = this.getString(kSwopId).valueOrErrorMessage("No swop id").fromBase58String()
 let WXID = this.getString(kWxId).valueOrErrorMessage("No wx id").fromBase58String()
+let admin1PK = this.getString(kAdmin1PK).valueOrErrorMessage("Can't get kAdmin1PK").fromBase58String()
+let admin2PK = this.getString(kAdmin2PK).valueOrErrorMessage("Can't get kAdmin2PK").fromBase58String()
+let admin3PK = this.getString(kAdmin3PK).valueOrErrorMessage("Can't get kAdmin3PK").fromBase58String()
+let operatorPK = this.getString(kOperatorCallPK).valueOrErrorMessage("Can't get operatorPK").fromBase58String()
 
 func unknownPoolType() = throw("Wrong pool type")
 
 func getLendSrvAddr() = Address(this.getString(kLendService).valueOrErrorMessage("Can't get lend service addr").fromBase58String())
 
-func getAdminCallAddr() = this.getString(kAdminCallPK).valueOrErrorMessage("Can't get admin addr").fromBase58String().addressFromPublicKey()
+func isOperatorCall(i: Invocation) = if i.callerPublicKey == operatorPK then unit
+        else throw("Only operator can call this function")
 
-func isAdminCall(i: Invocation) = if i.caller == getAdminCallAddr() then unit
+func isAdminCall(i: Invocation) = if i.callerPublicKey == admin1PK || i.callerPublicKey == admin3PK  then unit
         else throw("Only admin can call this function")
 
 func isSelfCall(i: Invocation) = if i.caller == this then unit
@@ -396,7 +404,7 @@ func calcWithdrawLPFromPoolVirt(poolAddr:Address, pType: String, shareId: String
 }
 
 #claim tokens [Swop, WX] from farming
-func claimFarmed(pType: String, pool: String) = {
+func claimFarmed(pType: String, pool: String, lpId: String) = {
   if pType == SF_POOL then 
     strict balBefore = accountBalance(SWOPID)
     strict inv = getSFFarmingAddr().invoke("claim", [pool], [])
@@ -404,7 +412,7 @@ func claimFarmed(pType: String, pool: String) = {
     (balAfter - balBefore, SWOPID)
   else if pType == WX_POOL then 
     strict balBefore = accountBalance(WXID)
-    strict inv = getWXFarmingAddr(pool.fromBase58String().Address()).invoke("claimWX", [pool], [])
+    strict inv = getWXFarmingAddr(pool.fromBase58String().Address()).invoke("claimWx", [lpId], [])
     let balAfter = accountBalance(WXID)
     (balAfter - balBefore, WXID)
   else unknownPoolType()
@@ -687,20 +695,21 @@ func calcPriceImpact(balA:Int, balB:Int, newBalA:Int, newBalB:Int) = {
   if pri < 0 then pri * (-1) else pri
 }
 
-func claimAndCheckAmntEx(pool: String, pType: String, claim: Boolean, amountToExchange: Int, change: Int) = {
-    let (claimAmount, claimAsset) = 
-    if claim then claimFarmed(pType, pool) 
-    else 
-      let claimedAsset = 
-        if pType == SF_POOL then 
-          SWOPID 
-        else if pType == WX_POOL then
-          WXID
-        else unknownPoolType()
-      (amountToExchange, claimedAsset)
-    let bal = accountBalance(claimAsset)
-    if amountToExchange > claimAmount + change || amountToExchange > bal  then throw("To big amount to exchange") else
-    (claimAmount, claimAsset)
+func claimAndCheckAmnt(pool: String, pType: String, claim: Boolean, amount: Int, change: Int) = {
+  let poolLpId = this.getStringValue(pool + kSharePool)
+  let (claimAmount, claimAsset) = 
+  if claim then claimFarmed(pType, pool, poolLpId) 
+  else 
+    let claimedAsset = 
+      if pType == SF_POOL then 
+        SWOPID 
+      else if pType == WX_POOL then
+        WXID
+      else unknownPoolType()
+    (amount, claimedAsset)
+  let bal = accountBalance(claimAsset)
+  if amount > claimAmount + change || amount > bal  then throw("To big amount to exchange") else
+  (claimAmount, claimAsset)
 }
 
 ########READONLY FUNCTIONS############
@@ -845,9 +854,9 @@ func init(
   wxSwapContract: String,
   swopAssetId: String,
   wxAssetId: String,
-  adminPubKey: String
+  operatorPubKey: String
 ) = isSelfCall(i).valueOrElse({
-  if getString(kAdminCallPK).isDefined() then throw("Already inited") else
+  if getString(kOperatorCallPK).isDefined() then throw("Already inited") else
   if !moneyBoxAddr.addressFromString().isDefined() then throw("moneyBoxAddr is not correct address") else
   if !sfFarmingAddr.addressFromString().isDefined() then throw("sfFarmingAddr is not correct address") else
   if !lendAddr.addressFromString().isDefined() then throw("lendAddr is not correct address") else
@@ -855,7 +864,7 @@ func init(
   if !keeperExContract.addressFromString().isDefined() then throw("keeperExContract is not correct address") else
   if !swopAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
   if !wxAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
-  if adminPubKey.fromBase58String().size() != 32 then throw("adminPubKey is not correct") else
+  if operatorPubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
   [
     StringEntry(kMoneyBox, moneyBoxAddr),
     StringEntry(kSFFarmingAddr, sfFarmingAddr),
@@ -865,7 +874,7 @@ func init(
     StringEntry(kWxSwapContract, wxSwapContract),
     StringEntry(kSwopId, swopAssetId),
     StringEntry(kWxId, wxAssetId),
-    StringEntry(kAdminCallPK, adminPubKey)
+    StringEntry(kOperatorCallPK, operatorPubKey)
   ]
 })
 
@@ -937,7 +946,7 @@ isLandCall(i).valueOrElse({
 @Callable(i) 
 func stopLoss(user: String, posId: Int, pool: String, assetId: String) = 
 isActive().valueOrElse(
-isAdminCall(i).valueOrElse({
+isOperatorCall(i).valueOrElse({
   let tokenOraclePrice = priceOracleAddr.getIntegerValue(assetId + kPriceInOracle)
   let stopLossPrice = this.getInteger(user + "_" + posId.toString() + "_" + pool + "_" + assetId + kUserStopLoss).valueOrErrorMessage("No entry")
   if tokenOraclePrice > stopLossPrice then throw("Token price greater stop loss price") else
@@ -963,10 +972,10 @@ func capitalizeExKeeper(
   options: List[String]
 ) = 
 isActive().valueOrElse(
-isAdminCall(i).valueOrElse({
+isOperatorCall(i).valueOrElse({
   let pType = this.getStringValue(kPool + pool)
   let change = this.getInteger(pool + kPoolCapChange).valueOrElse(0)
-  let (claimedAmount, claimedAsset) = claimAndCheckAmntEx(pool, pType, claim, amountToExchange, change)
+  let (claimedAmount, claimedAsset) = claimAndCheckAmnt(pool, pType, claim, amountToExchange, change)
   let exchangedAmount = exchangeKeeper(tokenToId, amountToExchange, claimedAsset, amountsIn, addresses, assetsToReceive, estReceived, slippageTolerance, minReceived, options)
   let newChange = claimedAmount + change - amountToExchange
   let changeEntry = if newChange >= 0 then [IntegerEntry(pool + kPoolCapChange, newChange)] else throw("Negative change")
@@ -984,10 +993,10 @@ func capitalizeExPuzzle(
   options: List[String]
 ) = 
 isActive().valueOrElse(
-isAdminCall(i).valueOrElse({
+isOperatorCall(i).valueOrElse({
   let pType = this.getStringValue(kPool + pool)
   let change = this.getInteger(pool + kPoolCapChange).valueOrElse(0)
-  let (claimedAmount, claimedAsset) = claimAndCheckAmntEx(pool, pType, claim, amountToExchange, change)
+  let (claimedAmount, claimedAsset) = claimAndCheckAmnt(pool, pType, claim, amountToExchange, change)
   let exchangedAmount = exchangePuzzle(tokenToId, amountToExchange, claimedAsset, routesStr,  minToReceive, options)
   let newChange = claimedAmount + change - amountToExchange
   let changeEntry = if newChange >= 0 then [IntegerEntry(pool + kPoolCapChange, newChange)] else []
@@ -1009,14 +1018,23 @@ func capitalizeExSwopFi(
   options: List[String]
 ) = 
 isActive().valueOrElse(
-isAdminCall(i).valueOrElse({
+isOperatorCall(i).valueOrElse({
   let pType = this.getStringValue(kPool + pool)
   let change = this.getInteger(pool + kPoolCapChange).valueOrElse(0)
-  let (claimedAmount, claimedAsset) = claimAndCheckAmntEx(pool, pType, claim, amountToExchange, change)
+  let (claimedAmount, claimedAsset) = claimAndCheckAmnt(pool, pType, claim, amountToExchange, change)
   let exchangedAmount = exchangeSwopFi(tokenToId, amountToExchange, claimedAsset, exchangers,exchangersType,args1,args2,routingAssetsKeys,minAmountToReceive,options)
   let newChange = claimedAmount + change - amountToExchange
   let changeEntry = if newChange >= 0 then [IntegerEntry(pool + kPoolCapChange, newChange)] else []
   capitalize(pool, pType, tokenToId, exchangedAmount) ++ changeEntry
+}))
+
+@Callable(i)
+func capitalizeNoEx(pool: String, claim: Boolean, amountFromBalance: Int) = 
+isActive().valueOrElse(
+isOperatorCall(i).valueOrElse({
+  let pType = this.getStringValue(kPool + pool)
+  let (claimedAmount, claimedAsset) = claimAndCheckAmnt(pool, pType, claim, amountFromBalance, 0)
+  capitalize(pool, pType, claimedAsset.assetIdToStr(), amountFromBalance)
 }))
 
 @Callable(i)
@@ -1109,4 +1127,11 @@ func shutdownPool(pool:String) = isAdminCall(i).valueOrElse({
 })
 
 @Verifier(tx)
-func verify() = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+func verify() = {
+    let multiSignedByAdmins = {
+        let adminPubKey1Signed = if sigVerify(tx.bodyBytes, tx.proofs[0], admin1PK) then 1 else 0
+        let adminPubKey2Signed = if sigVerify(tx.bodyBytes, tx.proofs[1], admin2PK) then 1 else 0
+        adminPubKey1Signed + adminPubKey2Signed == 2
+    }
+    multiSignedByAdmins
+}
