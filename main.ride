@@ -540,8 +540,11 @@ func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int)
   let poolAddr = pool.fromBase58String().Address()
   let (AId, BId, balA, balB, shareId) = getPoolData(poolAddr, pType)
   if tokenId != AId && tokenId != BId then throw("Wrong asset") else
+  let axlyFeeLoan = fraction(tokenAmount, getAxlyFee(pool, CAP_FEE_LOAN), FEE_SCALE6)
+  let axlyFeeNoLoan = fraction(tokenAmount, getAxlyFee(pool, CAP_FEE_NO_LOAN), FEE_SCALE6)
+  let axlyFee = axlyFeeLoan + axlyFeeNoLoan
   #replenish
-  let (pmtA, pmtB) = if tokenId == AId then (tokenAmount, 0) else (0, tokenAmount)
+  let (pmtA, pmtB) = if tokenId == AId then (tokenAmount - axlyFee, 0) else (0, tokenAmount - axlyFee)
   let (stakedAmount, nf) = replenishByType(pType, pool, NO_FEE, pmtA, AId, pmtB, BId, balA, balB, shareId)
 
   let curPoolInterestLoan = this.getInteger(pool + kPoolInterestLoan).valueOrElse(0)
@@ -559,15 +562,12 @@ func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int)
       curPoolInterestNoLoan + fraction(stakedNoLoan, SCALE10, totalShareAmount - totalShareAmountWithLoan)
     else 
       0
-  let axlyFeeLoan = fraction(stakedLoan, getAxlyFee(pool, CAP_FEE_LOAN), FEE_SCALE6)
-  let axlyFeeNoLoan = fraction(stakedNoLoan, getAxlyFee(pool, CAP_FEE_NO_LOAN), FEE_SCALE6)
-  strict axlyFee = unstakeLP(pool, pType, shareId, axlyFeeLoan + axlyFeeNoLoan)
   [
     IntegerEntry(pool + kPoolInterestLoan, newInterestLoan),
     IntegerEntry(pool + kPoolInterestNoLoan, newInterestNoLoan),
-    IntegerEntry(pool + kPoolTotal, totalShareAmount + stakedAmount - axlyFee),
-    IntegerEntry(pool + kPoolTotalLoan, totalShareAmountWithLoan + stakedLoan - axlyFeeLoan),
-    ScriptTransfer(moneyBox, axlyFeeLoan + axlyFeeNoLoan, shareId.fromBase58String())
+    IntegerEntry(pool + kPoolTotal, totalShareAmount + stakedAmount),
+    IntegerEntry(pool + kPoolTotalLoan, totalShareAmountWithLoan + stakedLoan),
+    ScriptTransfer(moneyBox, axlyFee, tokenId.fromBase58String())
   ] ++ getCursEntries(AId, BId, shareId, [])
 }
 
