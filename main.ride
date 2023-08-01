@@ -540,8 +540,14 @@ func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int)
   let poolAddr = pool.fromBase58String().Address()
   let (AId, BId, balA, balB, shareId) = getPoolData(poolAddr, pType)
   if tokenId != AId && tokenId != BId then throw("Wrong asset") else
-  let axlyFeeLoan = fraction(tokenAmount, getAxlyFee(pool, CAP_FEE_LOAN), FEE_SCALE6)
-  let axlyFeeNoLoan = fraction(tokenAmount, getAxlyFee(pool, CAP_FEE_NO_LOAN), FEE_SCALE6)
+  let totalShareAmount = getPoolTotalShare(pool)
+  let totalShareAmountWithLoan = getPoolTotalShareWithLoan(pool)
+  let loanPercent = totalShareAmountWithLoan.fraction(SCALE8, totalShareAmount)
+  let tokensForFeeLoan = tokenAmount.fraction(loanPercent, SCALE8)
+  let tokensForFeeNoLoan = tokenAmount - tokensForFeeLoan
+  
+  let axlyFeeLoan = fraction(tokensForFeeLoan, getAxlyFee(pool, CAP_FEE_LOAN), FEE_SCALE6)
+  let axlyFeeNoLoan = fraction(tokensForFeeNoLoan, getAxlyFee(pool, CAP_FEE_NO_LOAN), FEE_SCALE6)
   let axlyFee = axlyFeeLoan + axlyFeeNoLoan
   #replenish
   let (pmtA, pmtB) = if tokenId == AId then (tokenAmount - axlyFee, 0) else (0, tokenAmount - axlyFee)
@@ -549,17 +555,14 @@ func capitalize(pool: String,  pType: String, tokenId: String, tokenAmount: Int)
 
   let curPoolInterestLoan = this.getInteger(pool + kPoolInterestLoan).valueOrElse(0)
   let curPoolInterestNoLoan = this.getInteger(pool + kPoolInterestNoLoan).valueOrElse(0)
-  let totalShareAmount = getPoolTotalShare(pool)
-  let totalShareAmountWithLoan = getPoolTotalShareWithLoan(pool)
-  let loanPercent = fraction(totalShareAmountWithLoan, SCALE8, totalShareAmount)
-  let stakedLoan = fraction(stakedAmount, loanPercent, SCALE8)
+  let stakedLoan = stakedAmount.fraction(loanPercent, SCALE8)
   let stakedNoLoan = stakedAmount - stakedLoan
   let newInterestLoan = if totalShareAmountWithLoan > 0 then 
-      curPoolInterestLoan + fraction(stakedLoan, SCALE10, totalShareAmountWithLoan)
+      curPoolInterestLoan + stakedLoan.fraction(SCALE10, totalShareAmountWithLoan)
     else
       0
   let newInterestNoLoan = if totalShareAmount - totalShareAmountWithLoan > 0 then 
-      curPoolInterestNoLoan + fraction(stakedNoLoan, SCALE10, totalShareAmount - totalShareAmountWithLoan)
+      curPoolInterestNoLoan + stakedNoLoan.fraction(SCALE10, totalShareAmount - totalShareAmountWithLoan)
     else 
       0
   [
@@ -1048,7 +1051,7 @@ isActive().valueOrElse(
 isOperatorCall(i).valueOrElse({
   let pType = this.getStringValue(kPool + pool)
   let (claimedAmount, claimedAsset) = claimAndCheckAmnt(pool, pType, claim, amountFromBalance, 0)
-  capitalize(pool, pType, claimedAsset.assetIdToStr(), amountFromBalance)
+  capitalize(pool, pType, claimedAsset.assetIdToStr(), claimedAmount + amountFromBalance)
 }))
 
 @Callable(i)
@@ -1144,9 +1147,11 @@ func shutdownPool(pool:String) = isAdminCall(i).valueOrElse({
 func verify() = {
   match (tx) {
     case inv: InvokeScriptTransaction => {
+      let isSelf = sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
       let isRightFee = inv.fee == 900000 && inv.feeAssetId == unit
       let isInitCall = inv.function == "init"
-      isRightFee && isInitCall
+      let isnoPayments = inv.payments.size() == 0
+      isRightFee && isInitCall && isSelf && isnoPayments
     }
     case _ =>  {
       let group1Signed = 
