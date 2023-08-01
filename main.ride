@@ -748,13 +748,28 @@ func getUserPositionREADONLY(user: String, pools: List[String], posNum: List[Str
       let borrowAsset = this.getStringValue(pool + "_" + user + "_" + posNum[index] + kUserBorrowAssetId)
       strict debt = getLendSrvAddr().invoke("getAssetDebt", [false, user + "_" + posNum[index], borrowAsset], []).exactAs[Int]
       #Equity
-      let (assetToPay, amountToPay) = 
-        if pType == SF_POOL then
-          calcAmountToPaySF(pool, AId, BId, balA, balB, debt, borrowAsset)
-        else if pType == WX_POOL then
-          calcAmountToPayWX(pool, AId, BId, balA, balB, debt, borrowAsset)
-        else unknownPoolType()
-      let (eqWAmountA, eqWAmountB) = if(assetToPay == BId) then (wAmountA - debt, wAmountB - amountToPay) else (wAmountA - amountToPay, wAmountB - debt)
+      let amountToGetEx = 
+        if borrowAsset == AId && debt > wAmountA then 
+          debt - wAmountA
+        else if borrowAsset == BId && debt > wAmountB then
+          debt - wAmountB
+        else 0
+      let amountToPay = 
+        if amountToGetEx > 0 then 
+          if pType == SF_POOL then
+            let ex = calcAmountToPaySF(pool, AId, BId, balA, balB, amountToGetEx, borrowAsset)
+            ex._2
+          else if pType == WX_POOL then
+            let ex = calcAmountToPayWX(pool, AId, BId, balA, balB, amountToGetEx, borrowAsset)
+            ex._2
+          else unknownPoolType()
+        else
+          0 
+      let (eqWAmountA, eqWAmountB) = 
+        if(borrowAsset == AId) then 
+          (wAmountA + amountToGetEx - debt, wAmountB - amountToPay) 
+        else 
+          (wAmountA - amountToPay, wAmountB + amountToGetEx - debt)
       (wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, debts:+ debt, eqWAmountsA:+eqWAmountA, eqWAmountsB:+eqWAmountB, index + 1)
     else
       (wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, debts, wAmountsA:+ wAmountA, wAmountsB:+ wAmountB, index + 1)
@@ -875,10 +890,10 @@ func init(
   if !swopAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
   if !wxAssetId.fromBase58String().assetInfo().isDefined() then throw("swopAssetId is not correct asset id") else
   if operatorPubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
-  if group1Admin1PubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
-  if group1Admin2PubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
-  if group2Admin1PubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
-  if group2Admin2PubKey.fromBase58String().size() != 32 then throw("operatorPubKey is not correct") else
+  if group1Admin1PubKey.fromBase58String().size() != 32 then throw("group1Admin1PubKey is not correct") else
+  if group1Admin2PubKey.fromBase58String().size() != 32 then throw("group1Admin2PubKey is not correct") else
+  if group2Admin1PubKey.fromBase58String().size() != 32 then throw("group2Admin1PubKey is not correct") else
+  if group2Admin2PubKey.fromBase58String().size() != 32 then throw("group2Admin2PubKey is not correct") else
   [
     StringEntry(kMoneyBox, moneyBoxAddr),
     StringEntry(kSFFarmingAddr, sfFarmingAddr),
