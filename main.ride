@@ -465,7 +465,7 @@ func replenishByType(
 }
 
 # calc replenish enteries
-func replenishEntries(pool: String, user: String, stakedAmount: Int, axlyFeeAmount: Int, posNum: Int,  shareId:String, type: String, withLoan: Boolean) = {
+func replenishEntries(pool: String, user: String, stakedAmount: Int, axlyFeeAmount: Int, posNum: Int, shareId:String, type: String, withLoan: Boolean) = {
   let totalAmount = getPoolTotalShare(pool)
   let totalAmountLoan = getPoolTotalShareWithLoan(pool)
   let (curPoolInterest, totalStakedWithLoan) = 
@@ -594,6 +594,7 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
   let isBorrowed = this.getInteger(pool + "_" + user + "_" + posId + kUserBorrowAmount).valueOrElse(0) > 0
   let userCanWithdraw = userCanWithdrawShareCalc(user, pool, posId, isBorrowed)
   let poolTotalShare = getPoolTotalShare(pool)
+  let poolTotalShareLoan = getPoolTotalShareWithLoan(pool)
   let userAddr = user.fromBase58String().Address()
   let poolAddr = Address(pool.fromBase58String())
   let pType = this.getString(kPool + pool).valueOrErrorMessage("Unknown pool")
@@ -642,7 +643,7 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
         (cBalAAfterRepay - cBalABefore, cBalBAfterRepay - cBalBBefore - debt)
     else
       (tokensAmountA, tokensAmountB)
-  
+  let poolTotalLoanEntries = if isBorrowed then [IntegerEntry(pool + kPoolTotalLoan, poolTotalShareLoan - userCanWithdraw - stopLossFee)] else []
   let entries = [
     DeleteEntry(pool + "_" + user + "_" + posId + kUserPosition),
     DeleteEntry(user + "_" + posId + kUserPositionPool),
@@ -653,7 +654,7 @@ func withdrawToUser(user: String, pool:String, posId: String, stopLoss: Boolean)
     ScriptTransfer(userAddr, toUserA, idA),
     ScriptTransfer(userAddr, toUserB, idB),
     ScriptTransfer(moneyBox, stopLossFee, shareId.fromBase58String())
-  ] ++ getCursEntries(idAStr, idBStr, shareId, [])
+  ] ++ poolTotalLoanEntries ++ getCursEntries(idAStr, idBStr, shareId, [])
   (entries, [toUserA, toUserB])
 }
 
